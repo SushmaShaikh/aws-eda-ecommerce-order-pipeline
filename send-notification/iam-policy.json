@@ -1,0 +1,28 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["sns:Publish"],
+      "Resource": "arn:aws:sns:REGION:ACCOUNT_ID:order-confirmations"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "sqs:ReceiveMessage",
+        "sqs:DeleteMessage",
+        "sqs:GetQueueAttributes"
+      ],
+      "Resource": "arn:aws:sqs:REGION:ACCOUNT_ID:notification-queue"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ],
+      "Resource": "arn:aws:logs:REGION:ACCOUNT_ID:*"
+    }
+  ]
+}

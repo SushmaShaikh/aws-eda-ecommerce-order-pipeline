@@ -1,0 +1,4 @@
+{
+  "source": ["ecommerce.orders"],
+  "detail-type": ["OrderPlaced"]
+}

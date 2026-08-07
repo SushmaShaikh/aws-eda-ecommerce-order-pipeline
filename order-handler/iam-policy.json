@@ -1,0 +1,24 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["dynamodb:PutItem"],
+      "Resource": "arn:aws:dynamodb:REGION:ACCOUNT_ID:table/Orders"
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["events:PutEvents"],
+      "Resource": "arn:aws:events:REGION:ACCOUNT_ID:event-bus/default"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ],
+      "Resource": "arn:aws:logs:REGION:ACCOUNT_ID:*"
+    }
+  ]
+}
