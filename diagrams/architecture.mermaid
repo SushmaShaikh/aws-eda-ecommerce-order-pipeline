@@ -1,47 +1,27 @@
 flowchart TD
-    Customer([Customer clicks Place Order])
+    Customer([Customer places order])
     APIGW[API Gateway]
-    OrderLambda[Order Lambda<br/>writes order as PENDING]
-    DDB[(DynamoDB<br/>Orders table)]
-    EB{{EventBridge<br/>OrderPlaced event}}
+    Lambda1[Lambda: Order Handler]
+    DDB[(DynamoDB: Orders)]
+    EB{{EventBridge: OrderPlaced}}
 
-    Customer --> APIGW
-    APIGW --> OrderLambda
-    OrderLambda --> DDB
-    OrderLambda --> EB
+    Customer --> APIGW --> Lambda1
+    Lambda1 --> DDB
+    Lambda1 --> EB
 
-    EB --> InvQ[[SQS: Inventory Queue]]
-    EB --> PayQ[[SQS: Payment Queue]]
-    EB --> NotifyQ[[SQS: Notification Queue]]
-    EB --> Firehose[Kinesis Firehose]
+    EB --> SQS1[[SQS: Processing Queue]]
+    EB --> SQS2[[SQS: Notification Queue]]
 
-    InvQ --> InvSvc[Inventory Service<br/>reserve stock]
-    PayQ --> PaySvc[Payment Service<br/>charge customer]
-    NotifyQ --> NotifySvc[Notification Service]
-    Firehose --> S3[(S3 Data Lake)]
+    SQS1 --> Lambda2[Lambda: Process Order]
+    Lambda2 --> DDB
 
-    NotifySvc --> SNS([SNS: Order Confirmation Email])
-
-    InvSvc --> SF{Step Functions<br/>Order Orchestrator}
-    PaySvc --> SF
-
-    SF -->|both succeeded| Confirmed[OrderConfirmed event]
-    SF -->|either failed| Compensate[Compensate:<br/>release inventory / refund]
-
-    Confirmed --> Shipping[Shipping Service]
-
-    InvQ -.retries exhausted.-> InvDLQ[(Dead Letter Queue)]
-    PayQ -.retries exhausted.-> PayDLQ[(Dead Letter Queue)]
-    NotifyQ -.retries exhausted.-> NotifyDLQ[(Dead Letter Queue)]
+    SQS2 --> Lambda3[Lambda: Send Notification]
+    Lambda3 --> SNS([SNS: Order Confirmation])
 
     classDef sync fill:#4db8ff,stroke:#1a1a2e,color:#000
     classDef event fill:#ff9900,stroke:#1a1a2e,color:#000
-    classDef consumer fill:#4dff91,stroke:#1a1a2e,color:#000
-    classDef orch fill:#e74c3c,stroke:#1a1a2e,color:#fff
-    classDef dlq fill:#888,stroke:#1a1a2e,color:#fff,stroke-dasharray: 3 3
+    classDef queue fill:#4dff91,stroke:#1a1a2e,color:#000
 
-    class Customer,APIGW,OrderLambda,DDB sync
-    class EB,Confirmed event
-    class InvSvc,PaySvc,NotifySvc,SNS,Firehose,S3,Shipping consumer
-    class SF,Compensate orch
-    class InvDLQ,PayDLQ,NotifyDLQ dlq
+    class Customer,APIGW,Lambda1,DDB sync
+    class EB event
+    class SQS1,SQS2,Lambda2,Lambda3,SNS queue
