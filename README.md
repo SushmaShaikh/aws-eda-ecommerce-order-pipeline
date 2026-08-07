@@ -42,7 +42,22 @@ flowchart TD
     class EB event
     class SQS1,SQS2,Lambda2,Lambda3,SNS queue
 ```
+## Proof it works
 
+**Order status flips from PENDING to PROCESSED in DynamoDB:**
+![DynamoDB order processed](screenshots/dynamodb-processed.png)
+
+**Confirmation email delivered via SNS:**
+![Confirmation email](screenshots/confirmation-email.png)
+
+**Lambda executing cleanly, visible in CloudWatch Logs:**
+![CloudWatch logs](screenshots/cloudwatch-logs.png)
+
+**EventBridge rule fanning out to both SQS queues:**
+![EventBridge targets](screenshots/eventbridge-targets.png)
+
+**Sample request and response via Postman:**
+![Postman request](screenshots/postman-request.png)
 **The core idea:** the customer only waits on the fast, synchronous part
 (writing the order and getting an acknowledgment back). Everything else —
 processing and notifying — happens asynchronously via EventBridge fanning
