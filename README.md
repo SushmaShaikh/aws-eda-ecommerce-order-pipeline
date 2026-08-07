@@ -1,142 +1,132 @@
-# E-Commerce EDA on AWS — Full Build Guide
+# Event-Driven E-Commerce Order Pipeline on AWS
 
-Architecture: **API Gateway → Lambda → DynamoDB → EventBridge → SQS (x2) → Lambda → SNS**
+![AWS](https://img.shields.io/badge/AWS-232F3E?style=flat&logo=amazonaws&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.12-3776AB?style=flat&logo=python&logoColor=white)
+![EventBridge](https://img.shields.io/badge/EventBridge-FF4F8B?style=flat)
+![Serverless](https://img.shields.io/badge/Serverless-FD5750?style=flat)
+![Status](https://img.shields.io/badge/status-tested%20end--to--end-brightgreen?style=flat)
 
-Files in this package:
+A fully serverless, event-driven order processing pipeline built to deepen my
+hands-on understanding of event-driven architecture on AWS — ahead of AWS
+Solutions Architect interviews. Every service below was deployed and tested
+against a live account, not just diagrammed.
+
+## Architecture
+
+```mermaid
+flowchart TD
+    Customer([Customer places order])
+    APIGW[API Gateway]
+    Lambda1[Lambda: Order Handler]
+    DDB[(DynamoDB: Orders)]
+    EB{{EventBridge: OrderPlaced}}
+
+    Customer --> APIGW --> Lambda1
+    Lambda1 --> DDB
+    Lambda1 --> EB
+
+    EB --> SQS1[[SQS: Processing Queue]]
+    EB --> SQS2[[SQS: Notification Queue]]
+
+    SQS1 --> Lambda2[Lambda: Process Order]
+    Lambda2 --> DDB
+
+    SQS2 --> Lambda3[Lambda: Send Notification]
+    Lambda3 --> SNS([SNS: Order Confirmation])
+
+    classDef sync fill:#4db8ff,stroke:#1a1a2e,color:#000
+    classDef event fill:#ff9900,stroke:#1a1a2e,color:#000
+    classDef queue fill:#4dff91,stroke:#1a1a2e,color:#000
+
+    class Customer,APIGW,Lambda1,DDB sync
+    class EB event
+    class SQS1,SQS2,Lambda2,Lambda3,SNS queue
 ```
-order-handler/index.py          Lambda 1 — receives order, writes to DynamoDB, publishes event
-order-handler/iam-policy.json   IAM policy for Lambda 1
-process-order/index.py          Lambda 2 — updates order status (triggered by SQS)
-process-order/iam-policy.json   IAM policy for Lambda 2
-send-notification/index.py      Lambda 3 — sends SNS confirmation (triggered by SQS)
-send-notification/iam-policy.json  IAM policy for Lambda 3
-eventbridge-rule-pattern.json   Event pattern for the EventBridge rule
+
+**The core idea:** the customer only waits on the fast, synchronous part
+(writing the order and getting an acknowledgment back). Everything else —
+processing and notifying — happens asynchronously via EventBridge fanning
+out to independent SQS-backed consumers, so a slow or failing downstream
+service never blocks checkout.
+
+## How it works
+
+1. Customer submits an order via **API Gateway** (`POST /orders`)
+2. The **Order Handler Lambda** writes the order to **DynamoDB** with status
+   `PENDING`, then publishes an `OrderPlaced` event to **EventBridge**, and
+   immediately returns a response — the customer never waits on anything
+   downstream
+3. **EventBridge** fans that single event out to two independent **SQS**
+   queues, each with its own dead-letter queue for messages that fail
+   repeatedly
+4. **Process Order Lambda** consumes from the processing queue and updates
+   the order's status in DynamoDB to `PROCESSED`
+5. **Send Notification Lambda** consumes from the notification queue and
+   publishes a confirmation message to **SNS**, which emails the customer
+
+## Tech stack
+
+| Service | Role |
+|---|---|
+| API Gateway | Public HTTP endpoint |
+| Lambda (x3) | Order handling, processing, notification |
+| DynamoDB | Order storage |
+| EventBridge | Event bus / fan-out |
+| SQS (+ DLQs) | Decoupling, buffering, retry/failure isolation |
+| SNS | Customer notification delivery |
+
+## Debugging notes from building this
+
+Two real issues came up while building this — leaving them here since the
+troubleshooting was as instructive as the build itself:
+
+- **The EventBridge console wizard doesn't save a rule until you click the
+  final "Create rule" button.** I navigated away mid-flow to go create the
+  SQS queues first (since the console wanted a target before it would let me
+  finish), and the entire in-progress rule was silently discarded — no
+  warning, no draft saved. Diagnosed by tracing the failure backward: no
+  Lambda logs → no messages ever reaching the queue → the rule wasn't even
+  listed under Rules. Fixed by recreating the rule in a single pass, adding
+  both SQS targets before clicking "Create rule."
+
+- **SNS FIFO topics only support SQS as a subscriber protocol — not email.**
+  I'd created the notification topic as FIFO by default, then couldn't
+  figure out why "Email" wasn't showing up as an option in the subscription
+  protocol dropdown. Recreated the topic as Standard type and email
+  subscriptions worked immediately.
+
+## Repo structure
+
+```
+order-handler/          Lambda 1 — receives order, writes to DynamoDB, publishes event
+process-order/          Lambda 2 — updates order status (triggered by SQS)
+send-notification/      Lambda 3 — sends SNS confirmation (triggered by SQS)
+diagrams/               Architecture diagram source
+eventbridge-rule-pattern.json   Event pattern used for the EventBridge rule
 ```
 
-Replace `REGION` and `ACCOUNT_ID` in every IAM policy file with your actual
-values before attaching them.
+Each Lambda folder includes its code and the least-privilege IAM policy it
+was deployed with (`REGION`/`ACCOUNT_ID` are placeholders — swap in your own
+before deploying).
 
----
+## Possible extensions
 
-## Step 1 — Create the DynamoDB table
+- Add a **Step Functions** orchestrator if a real payment/inventory check
+  were introduced — needed to coordinate a "wait for both, then confirm or
+  compensate" flow, which this simplified version doesn't require since its
+  two consumers are fully independent
+- **X-Ray** tracing across all three Lambdas for full request-path visibility
+- **CloudWatch alarms** on each DLQ's message count to catch repeated
+  failures proactively
 
-1. Console → DynamoDB → **Create table**
-2. Table name: `Orders`
-3. Partition key: `orderId` (String)
-4. Table settings: **Default settings** (on-demand capacity)
-5. Create table
+## Testing
 
----
-
-## Step 2 — Create the Order Handler Lambda
-
-1. Console → Lambda → **Create function** → Author from scratch
-2. Name: `order-handler`, Runtime: **Python 3.12**
-3. Paste the contents of `order-handler/index.py` into the code editor
-4. Configuration → Environment variables → add:
-   - `TABLE_NAME` = `Orders`
-   - `EVENT_BUS_NAME` = `default`
-5. Configuration → Permissions → click the execution role → **Add permissions
-   → Create inline policy** → paste `order-handler/iam-policy.json`
-   (after replacing REGION/ACCOUNT_ID)
-6. Deploy
-
----
-
-## Step 3 — Create the API Gateway
-
-1. Console → API Gateway → **Create API** → **HTTP API** → Build
-2. Add integration: Lambda → select `order-handler`
-3. Add route: `POST /orders`
-4. Create a stage (e.g. `$default`) and deploy
-5. Copy the **Invoke URL** — you'll use it to test in Step 8
-
----
-
-## Step 4 — Create the EventBridge rule
-
-1. Console → EventBridge → **Rules** → **Create rule**
-2. Name: `order-placed-rule`, Event bus: `default`
-3. Rule type: **Rule with an event pattern**
-4. Event pattern: paste the contents of `eventbridge-rule-pattern.json`
-5. You'll add targets in the next step, after the queues exist — save the
-   rule with no targets for now, or come back to add them
-
----
-
-## Step 5 — Create the two SQS queues (+ DLQs)
-
-1. Console → SQS → **Create queue**
-   - Name: `processing-queue-dlq` → Create (repeat for `notification-queue-dlq`)
-2. Console → SQS → **Create queue**
-   - Name: `processing-queue` → Standard type
-   - Scroll to **Dead-letter queue** → Enable → select `processing-queue-dlq`
-     → Maximum receives: `3`
-   - Create queue. Repeat for `notification-queue` with `notification-queue-dlq`
-3. Go back to your `order-placed-rule` from Step 4 → **Add target** twice:
-   - Target 1: SQS queue → `processing-queue`
-   - Target 2: SQS queue → `notification-queue`
-
----
-
-## Step 6 — Create the Process Order Lambda
-
-1. Console → Lambda → **Create function** → `process-order`, Python 3.12
-2. Paste `process-order/index.py`
-3. Environment variables: `TABLE_NAME` = `Orders`
-4. Configuration → Triggers → **Add trigger** → SQS → select `processing-queue`
-   (batch size 1–10 is fine to start)
-5. Attach the inline policy from `process-order/iam-policy.json`
-6. Deploy
-
----
-
-## Step 7 — Create the SNS topic + Notification Lambda
-
-1. Console → SNS → **Create topic** → Standard → name `order-confirmations`
-2. **Create subscription** → Protocol: Email → enter your email → confirm via
-   the link AWS emails you
-3. Console → Lambda → **Create function** → `send-notification`, Python 3.12
-4. Paste `send-notification/index.py`
-5. Environment variables: `TOPIC_ARN` = *(copy the ARN from the SNS topic page)*
-6. Configuration → Triggers → **Add trigger** → SQS → select `notification-queue`
-7. Attach the inline policy from `send-notification/iam-policy.json`
-8. Deploy
-
----
-
-## Step 8 — Test end to end
-
-From your terminal (replace the URL with your API Gateway Invoke URL):
+Tested end to end via a manual `POST /orders` request: confirmed the order
+lands in DynamoDB as `PENDING`, flips to `PROCESSED` within seconds, and a
+confirmation email is delivered via SNS.
 
 ```bash
 curl -X POST https://YOUR-API-ID.execute-api.REGION.amazonaws.com/orders \
   -H "Content-Type: application/json" \
-  -d '{
-        "customerId": "cust-123",
-        "items": [{"sku": "ABC-001", "qty": 2}]
-      }'
+  -d '{"customerId": "cust-123", "items": [{"sku": "ABC-001", "qty": 2}]}'
 ```
-
-Expected result:
-1. Response comes back immediately: `{"orderId": "...", "status": "PENDING"}`
-2. Check DynamoDB → `Orders` table → the item appears with status `PENDING`,
-   then shortly after updates to `PROCESSED`
-3. Check your email — you should receive the order confirmation from SNS
-
-**If something doesn't show up:** check CloudWatch Logs for each Lambda
-(Lambda → your function → Monitor → View CloudWatch logs). The most common
-first-time issues are a missing IAM permission or the EventBridge pattern not
-matching the `source`/`detail-type` your Lambda published — both show up
-clearly in the logs.
-
----
-
-## Optional next steps once this works
-
-- Add a **Step Functions** orchestrator if you extend this to also involve
-  a payment/inventory service that needs to coordinate before confirming
-- Add **X-Ray** tracing (enable "Active tracing" on each Lambda and on API
-  Gateway) to see the full request path across all three functions
-- Add a **CloudWatch alarm** on each DLQ's `ApproximateNumberOfMessages` so
-  you get notified if messages start failing repeatedly
