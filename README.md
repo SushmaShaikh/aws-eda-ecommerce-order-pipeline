@@ -11,17 +11,41 @@ hands-on understanding of event-driven architecture on AWS — ahead of AWS
 Solutions Architect interviews. Every service below was deployed and tested
 against a live account, not just diagrammed.
 
+## Proof it works
+
+**Order status flips from PENDING to PROCESSED in DynamoDB:**
+![DynamoDB order processed](screenshots/dynamodb-processed.png)
+
+**Confirmation email delivered via SNS:**
+![Confirmation email](screenshots/confirmation-email.png)
+
+**Lambda executing cleanly, visible in CloudWatch Logs:**
+![CloudWatch logs](screenshots/cloudwatch-logs.png)
+
+**One EventBridge rule fanning a single `OrderPlaced` event out to two
+independent SQS queues:**
+![EventBridge targets](screenshots/eventbridge-targets.png)
+
+**Authenticated request accepted (202) vs. unauthenticated request rejected
+(401) — confirming the Cognito authorizer is actually enforcing, not just
+present:**
+![Postman authenticated vs rejected](Screenshots)
+(screenshots/postman-auth-vs-202.png)(screenshots/postman-auth-401.png)
+
 ## Architecture
 
 ```mermaid
 flowchart TD
     Customer([Customer places order])
+    Cognito[Cognito: JWT Authorizer]
     APIGW[API Gateway]
     Lambda1[Lambda: Order Handler]
     DDB[(DynamoDB: Orders)]
     EB{{EventBridge: OrderPlaced}}
 
-    Customer --> APIGW --> Lambda1
+    Customer -->|Bearer token| APIGW
+    APIGW -->|validates token| Cognito
+    Cognito -->|verified claims| Lambda1
     Lambda1 --> DDB
     Lambda1 --> EB
 
@@ -37,27 +61,14 @@ flowchart TD
     classDef sync fill:#4db8ff,stroke:#1a1a2e,color:#000
     classDef event fill:#ff9900,stroke:#1a1a2e,color:#000
     classDef queue fill:#4dff91,stroke:#1a1a2e,color:#000
+    classDef security fill:#e74c3c,stroke:#1a1a2e,color:#fff
 
     class Customer,APIGW,Lambda1,DDB sync
     class EB event
     class SQS1,SQS2,Lambda2,Lambda3,SNS queue
+    class Cognito security
 ```
-## Proof it works
 
-**Order status flips from PENDING to PROCESSED in DynamoDB:**
-![DynamoDB order processed](screenshots/dynamodb-processed.png)
-
-**Confirmation email delivered via SNS:**
-![Confirmation email](screenshots/confirmation-email.png)
-
-**Lambda executing cleanly, visible in CloudWatch Logs:**
-![CloudWatch logs](screenshots/cloudwatch-logs.png)
-
-**EventBridge rule fanning out to both SQS queues:**
-![EventBridge targets](screenshots/eventbridge-targets.png)
-
-**Sample request and response via Postman:**
-![Postman request](screenshots/postman-request.png)
 **The core idea:** the customer only waits on the fast, synchronous part
 (writing the order and getting an acknowledgment back). Everything else —
 processing and notifying — happens asynchronously via EventBridge fanning
@@ -66,24 +77,31 @@ service never blocks checkout.
 
 ## How it works
 
-1. Customer submits an order via **API Gateway** (`POST /orders`)
-2. The **Order Handler Lambda** writes the order to **DynamoDB** with status
-   `PENDING`, then publishes an `OrderPlaced` event to **EventBridge**, and
-   immediately returns a response — the customer never waits on anything
-   downstream
-3. **EventBridge** fans that single event out to two independent **SQS**
+1. Customer submits an order via **API Gateway** (`POST /orders`), with a
+   Cognito-issued access token in the `Authorization` header
+2. API Gateway's **Cognito JWT authorizer** validates the token before the
+   request ever reaches application code — an invalid or missing token is
+   rejected with a `401`
+3. The **Order Handler Lambda** reads the caller's identity from the
+   *verified* token claims (never from the request body, so a customer can
+   never place an order pretending to be someone else), writes the order to
+   **DynamoDB** with status `PENDING`, then publishes an `OrderPlaced` event
+   to **EventBridge**, and immediately returns a response — the customer
+   never waits on anything downstream
+4. **EventBridge** fans that single event out to two independent **SQS**
    queues, each with its own dead-letter queue for messages that fail
    repeatedly
-4. **Process Order Lambda** consumes from the processing queue and updates
+5. **Process Order Lambda** consumes from the processing queue and updates
    the order's status in DynamoDB to `PROCESSED`
-5. **Send Notification Lambda** consumes from the notification queue and
+6. **Send Notification Lambda** consumes from the notification queue and
    publishes a confirmation message to **SNS**, which emails the customer
 
 ## Tech stack
 
 | Service | Role |
 |---|---|
-| API Gateway | Public HTTP endpoint |
+| Cognito | Authentication — issues and validates JWTs |
+| API Gateway | Public HTTP endpoint, enforces the Cognito authorizer |
 | Lambda (x3) | Order handling, processing, notification |
 | DynamoDB | Order storage |
 | EventBridge | Event bus / fan-out |
@@ -110,6 +128,56 @@ troubleshooting was as instructive as the build itself:
   protocol dropdown. Recreated the topic as Standard type and email
   subscriptions worked immediately.
 
+- **Cognito's "Create user" screen doesn't actually offer a true permanent
+  password, despite the label.** Both options under its password section
+  ("Set a password" / "Generate a password") still create the user with a
+  `FORCE_CHANGE_PASSWORD` status, which then causes a misleading
+  `NotAuthorizedException: Incorrect username or password` error from
+  `initiate-auth` — the real problem has nothing to do with the password
+  itself. Fixed by explicitly forcing a permanent password via the CLI:
+  `aws cognito-idp admin-set-user-password --user-pool-id POOL_ID
+  --username EMAIL --password 'Pass123!' --permanent`. The `--permanent`
+  flag is the piece the console UI has no equivalent for.
+
+- **A copy-pasted CLI command silently failed with a confusing `Unknown
+  options:` error** (with nothing listed after the colon). Root cause:
+  pasting from a browser/chat window occasionally splits a long command
+  across lines or mangles `--` flags. Fixed by typing the command fresh in
+  a plain text editor first, then pasting from there as a single line.
+
+## Security
+
+The `POST /orders` route is protected by a **Cognito JWT authorizer** on API
+Gateway — every request must carry a valid, signed access token issued by a
+Cognito User Pool. Two things worth calling out beyond "there's a login now":
+
+- **Authorization happens before the request reaches application code.**
+  API Gateway rejects an invalid or missing token with a `401` on its own —
+  the Lambda never even runs for an unauthenticated request.
+- **The Lambda trusts the verified token claims, not the request body.**
+  The customer's identity comes from the token's `sub` claim
+  (`event["requestContext"]["authorizer"]["jwt"]["claims"]["sub"]`), not
+  from a `customerId` field a client could simply type into the JSON
+  payload. This closes a real vulnerability: without this, any
+  authenticated user could place an order under someone else's customer ID
+  just by editing the request body.
+
+**Setup summary** (Cognito → API Gateway wiring):
+
+1. Cognito User Pool + a **public app client** (SPA type, no client secret
+   — there's no backend here to safely hold one)
+2. `ALLOW_USER_PASSWORD_AUTH` enabled on the app client, so a token can be
+   fetched directly via `aws cognito-idp initiate-auth` for testing, rather
+   than requiring a hosted login page
+3. An API Gateway **JWT authorizer**, configured with:
+   - Issuer URL: `https://cognito-idp.<region>.amazonaws.com/<user-pool-id>`
+   - Audience: the app client ID
+4. The authorizer attached directly to the `POST /orders` route
+
+Verified both directions in Postman: a request with a valid Bearer token
+returns `202`; the same request with the `Authorization` header removed
+returns `401`.
+
 ## Repo structure
 
 ```
@@ -134,6 +202,26 @@ before deploying).
 - **CloudWatch alarms** on each DLQ's message count to catch repeated
   failures proactively
 
+## Proof it works
+
+**Order status flips from PENDING to PROCESSED in DynamoDB:**
+![DynamoDB order processed](screenshots/dynamodb-processed.png)
+
+**Confirmation email delivered via SNS:**
+![Confirmation email](screenshots/confirmation-email.png)
+
+**Lambda executing cleanly, visible in CloudWatch Logs:**
+![CloudWatch logs](screenshots/cloudwatch-logs.png)
+
+**One EventBridge rule fanning a single `OrderPlaced` event out to two
+independent SQS queues:**
+![EventBridge targets](screenshots/eventbridge-targets.png)
+
+**Authenticated request accepted (202) vs. unauthenticated request rejected
+(401) — confirming the Cognito authorizer is actually enforcing, not just
+present:**
+![Postman authenticated vs rejected](screenshots/postman-auth-vs-401.png)
+
 ## Testing
 
 Tested end to end via a manual `POST /orders` request: confirmed the order
@@ -143,5 +231,10 @@ confirmation email is delivered via SNS.
 ```bash
 curl -X POST https://YOUR-API-ID.execute-api.REGION.amazonaws.com/orders \
   -H "Content-Type: application/json" \
-  -d '{"customerId": "cust-123", "items": [{"sku": "ABC-001", "qty": 2}]}'
+  -H "Authorization: Bearer YOUR_COGNITO_ACCESS_TOKEN" \
+  -d '{"items": [{"sku": "ABC-001", "qty": 2}]}'
 ```
+
+Verified both directions: a request with a valid token returns `202`, and
+the same request with the `Authorization` header removed entirely returns
+`401` — confirming the authorizer is actually enforcing, not just present.
