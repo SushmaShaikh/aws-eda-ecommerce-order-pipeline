@@ -11,63 +11,8 @@ hands-on understanding of event-driven architecture on AWS — ahead of AWS
 Solutions Architect interviews. Every service below was deployed and tested
 against a live account, not just diagrammed.
 
-## Proof it works
-
-**Order status flips from PENDING to PROCESSED in DynamoDB:**
-![DynamoDB order processed](screenshots/dynamodb-processed.png)
-
-**Confirmation email delivered via SNS:**
-![Confirmation email](screenshots/confirmation-email.png)
-
-**Lambda executing cleanly, visible in CloudWatch Logs:**
-![CloudWatch logs](screenshots/cloudwatch-logs.png)
-
-**One EventBridge rule fanning a single `OrderPlaced` event out to two
-independent SQS queues:**
-![EventBridge targets](screenshots/eventbridge-targets.png)
-
-**Authenticated request accepted (202) vs. unauthenticated request rejected
-(401) — confirming the Cognito authorizer is actually enforcing, not just
-present:**
-![Postman authenticated vs rejected](Screenshots)
-(screenshots/postman-auth-vs-202.png)(screenshots/postman-auth-401.png)
-
 ## Architecture
-
-```mermaid
-flowchart TD
-    Customer([Customer places order])
-    Cognito[Cognito: JWT Authorizer]
-    APIGW[API Gateway]
-    Lambda1[Lambda: Order Handler]
-    DDB[(DynamoDB: Orders)]
-    EB{{EventBridge: OrderPlaced}}
-
-    Customer -->|Bearer token| APIGW
-    APIGW -->|validates token| Cognito
-    Cognito -->|verified claims| Lambda1
-    Lambda1 --> DDB
-    Lambda1 --> EB
-
-    EB --> SQS1[[SQS: Processing Queue]]
-    EB --> SQS2[[SQS: Notification Queue]]
-
-    SQS1 --> Lambda2[Lambda: Process Order]
-    Lambda2 --> DDB
-
-    SQS2 --> Lambda3[Lambda: Send Notification]
-    Lambda3 --> SNS([SNS: Order Confirmation])
-
-    classDef sync fill:#4db8ff,stroke:#1a1a2e,color:#000
-    classDef event fill:#ff9900,stroke:#1a1a2e,color:#000
-    classDef queue fill:#4dff91,stroke:#1a1a2e,color:#000
-    classDef security fill:#e74c3c,stroke:#1a1a2e,color:#fff
-
-    class Customer,APIGW,Lambda1,DDB sync
-    class EB event
-    class SQS1,SQS2,Lambda2,Lambda3,SNS queue
-    class Cognito security
-```
+![image](./diagrams/aws-eda-ecommerce-order-pipeline%20architecture.png)
 
 **The core idea:** the customer only waits on the fast, synchronous part
 (writing the order and getting an acknowledgment back). Everything else —
@@ -139,12 +84,6 @@ troubleshooting was as instructive as the build itself:
   --username EMAIL --password 'Pass123!' --permanent`. The `--permanent`
   flag is the piece the console UI has no equivalent for.
 
-- **A copy-pasted CLI command silently failed with a confusing `Unknown
-  options:` error** (with nothing listed after the colon). Root cause:
-  pasting from a browser/chat window occasionally splits a long command
-  across lines or mangles `--` flags. Fixed by typing the command fresh in
-  a plain text editor first, then pasting from there as a single line.
-
 ## Security
 
 The `POST /orders` route is protected by a **Cognito JWT authorizer** on API
@@ -202,6 +141,23 @@ before deploying).
 - **CloudWatch alarms** on each DLQ's message count to catch repeated
   failures proactively
 
+## Testing
+
+Tested end to end via a manual `POST /orders` request: confirmed the order
+lands in DynamoDB as `PENDING`, flips to `PROCESSED` within seconds, and a
+confirmation email is delivered via SNS.
+
+```bash
+curl -X POST https://YOUR-API-ID.execute-api.REGION.amazonaws.com/orders \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_COGNITO_ACCESS_TOKEN" \
+  -d '{"items": [{"sku": "ABC-001", "qty": 2}]}'
+```
+
+Verified both directions: a request with a valid token returns `202`, and
+the same request with the `Authorization` header removed entirely returns
+`401` — confirming the authorizer is actually enforcing, not just present.
+
 ## Proof it works
 
 **Order status flips from PENDING to PROCESSED in DynamoDB:**
@@ -220,21 +176,6 @@ independent SQS queues:**
 **Authenticated request accepted (202) vs. unauthenticated request rejected
 (401) — confirming the Cognito authorizer is actually enforcing, not just
 present:**
-![Postman authenticated vs rejected](screenshots/postman-auth-vs-401.png)
+![Postman authenticated ](screenshots/postman-auth-vs-202.png)
 
-## Testing
-
-Tested end to end via a manual `POST /orders` request: confirmed the order
-lands in DynamoDB as `PENDING`, flips to `PROCESSED` within seconds, and a
-confirmation email is delivered via SNS.
-
-```bash
-curl -X POST https://YOUR-API-ID.execute-api.REGION.amazonaws.com/orders \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_COGNITO_ACCESS_TOKEN" \
-  -d '{"items": [{"sku": "ABC-001", "qty": 2}]}'
-```
-
-Verified both directions: a request with a valid token returns `202`, and
-the same request with the `Authorization` header removed entirely returns
-`401` — confirming the authorizer is actually enforcing, not just present.
+![Postman rejected](screenshots/postman-auth-401.png)
