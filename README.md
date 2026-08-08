@@ -7,8 +7,7 @@
 ![Status](https://img.shields.io/badge/status-tested%20end--to--end-brightgreen?style=flat)
 
 A fully serverless, event-driven order processing pipeline built to deepen my
-hands-on understanding of event-driven architecture on AWS — ahead of AWS
-Solutions Architect interviews. Every service below was deployed and tested
+hands-on understanding of event-driven architecture on AWS. Every service below was deployed and tested
 against a live account, not just diagrammed.
 
 ## Architecture
